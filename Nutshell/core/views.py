@@ -3,17 +3,28 @@ import json
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
-import nltk
-from sentence_transformers import SentenceTransformer, util
-import numpy as np
+import nltk # type: ignore
+from sentence_transformers import SentenceTransformer, util # type: ignore
+import numpy as np # type: ignore
 import logging
 from django.views.decorators.csrf import csrf_exempt
-from scipy.special import softmax
-from scipy.sparse.csgraph import connected_components
+from scipy.special import softmax # type: ignore
+from scipy.sparse.csgraph import connected_components # type: ignore
+from googletrans import Translator # type: ignore
+################################################################
+import os
+from rest_framework.views import APIView
+from rest_framework.parsers import MultiPartParser, FormParser
+from docx import Document # type: ignore
+from pptx import Presentation # type: ignore
+from pptx.util import Inches, Pt # type: ignore
+from django.http import HttpResponse
 
 
 
-# Your helper functions and logging setup
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#Summarize start
+
 def degree_centrality_scores(similarity_matrix, threshold=None, increase_power=True):
     if not (threshold is None or isinstance(threshold, float) and 0 <= threshold < 1):
         raise ValueError("'threshold' should be a floating-point number from the interval [0, 1) or None")
@@ -126,3 +137,134 @@ def Summarization(request):
     summary = ' '.join(summary_sentences)
 
     return Response({"summary": summary}, status=status.HTTP_200_OK)
+
+#Summarize End
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+
+
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#Translate start
+
+@api_view(['POST'])
+@csrf_exempt
+def translate_english_to_arabic(request):
+    try:
+        data = request.data
+        text = data.get('text', '')
+        if not text:
+            return Response({'error': 'Text field is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+
+        translator = Translator()
+        translated = translator.translate(text, src='en', dest='ar')
+        return Response({'translated_text': translated.text}, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    
+# Translate End
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+
+# Book Start
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+model = SentenceTransformer("all-MiniLM-L6-v2")
+
+# Define the path to the Downloads directory
+DOWNLOADS_PATH = os.path.join(os.path.expanduser('~'), 'Downloads')
+
+class DocumentUploadView(APIView):
+    parser_classes = (MultiPartParser, FormParser)
+
+    def post(self, request, *args, **kwargs):
+        if 'file' not in request.FILES:
+            return Response({"error": "No file provided"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        file = request.FILES['file']
+        # Save the file to the Downloads directory
+        file_name = 'uploaded_file.docx'
+        temp_file_path = os.path.join(DOWNLOADS_PATH, file_name)
+        with open(temp_file_path, 'wb+') as temp_file:
+            for chunk in file.chunks():
+                temp_file.write(chunk)
+
+        try:
+            # Process the file and generate the PowerPoint
+            sections = self.split_chapter_into_sections(temp_file_path)
+            ppt_file_name = 'generated_presentation.pptx'
+            ppt_file_path = os.path.join(DOWNLOADS_PATH, ppt_file_name)
+            self.save_summaries_to_pptx(sections, ppt_file_path)
+            response = self.create_ppt_response(ppt_file_path)
+            return response
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def split_chapter_into_sections(self, docx_file_path):
+        document = Document(docx_file_path)
+        sections = []
+        current_section = []
+        current_header = None
+
+        for para in document.paragraphs:
+            stripped_line = para.text.strip()
+            if stripped_line.isupper() and stripped_line:
+                if current_section:
+                    sections.append((current_header, '\n'.join(current_section)))
+                    current_section = []
+                current_header = stripped_line
+            else:
+                if current_header:
+                    current_section.append(para.text)
+
+        if current_section:
+            sections.append((current_header, '\n'.join(current_section)))
+
+        return sections
+
+    def summarize_text(self, text):
+        sentences = nltk.sent_tokenize(text)
+        if len(sentences) == 0:
+            return ["No content to summarize."]
+        if len(sentences) == 1:
+            return [sentences[0]]
+
+        embeddings = model.encode(sentences, convert_to_tensor=True)
+        cos_scores = util.cos_sim(embeddings, embeddings).numpy()
+        centrality_scores = degree_centrality_scores(cos_scores, threshold=None)
+        most_central_sentence_indices = np.argsort(-centrality_scores)
+        summary = [sentences[idx].strip() for idx in most_central_sentence_indices[:5]]
+
+        return summary
+
+    def save_summaries_to_pptx(self, sections, output_pptx_file_path):
+        prs = Presentation()
+        for i, (header, section) in enumerate(sections):
+            summary = self.summarize_text(section)
+            slide = prs.slides.add_slide(prs.slide_layouts[1])
+            title = slide.shapes.title
+            title.text = header if header else f"Section {i+1} Summary"
+
+            content = '\n'.join([f"- {bullet_point}" for bullet_point in summary])
+            text_box = slide.shapes.add_textbox(Inches(1), Inches(1.5), Inches(8.5), Inches(5))
+            text_frame = text_box.text_frame
+            text_frame.word_wrap = True
+
+            for bullet_point in summary:
+                p = text_frame.add_paragraph()
+                p.text = bullet_point
+                p.space_after = Inches(0.1)
+                p.level = 0
+                p.font.name = 'Arial'
+                p.font.size = Pt(12)
+
+        prs.save(output_pptx_file_path)
+
+    def create_ppt_response(self, ppt_file_path):
+        with open(ppt_file_path, 'rb') as ppt_file:
+            response = HttpResponse(ppt_file.read(), content_type='application/vnd.openxmlformats-officedocument.presentationml.presentation')
+            response['Content-Disposition'] = f'attachment; filename="{os.path.basename(ppt_file_path)}"'
+            return response
+
+# Book End
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++

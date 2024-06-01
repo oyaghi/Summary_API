@@ -1,0 +1,9 @@
+djangorestframework
+nltk
+sentence_transformers
+lexrank 
+numpy
+gtts
+googletrans
+python-docx
+python-pptx

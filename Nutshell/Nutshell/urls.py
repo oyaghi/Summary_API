@@ -19,5 +19,6 @@ from django.urls import include, path
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    path('nutshell/', include('core.urls'))
+    path('nutshell/', include('core.urls')),
+    path('ai/', include('chatgpt.urls'))
 ]
